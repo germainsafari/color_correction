@@ -92,12 +92,12 @@ class ColorMatcher:
         return transfer_bgr
 
 # ==========================================
-# 2. AI ENGINE (Human Segmentation)
+# 2. AI ENGINE (Human Segmentation - Tuned)
 # ==========================================
 class HumanDetector:
     def __init__(self):
         self.mp_selfie = mp.solutions.selfie_segmentation
-        # model_selection=1 is 'landscape' (slower but higher quality)
+        # model_selection=1 é melhor para o corpo inteiro/paisagem
         self.segmenter = self.mp_selfie.SelfieSegmentation(model_selection=1)
 
     def get_mask(self, image):
@@ -105,11 +105,31 @@ class HumanDetector:
         results = self.segmenter.process(img_rgb)
         
         mask = results.segmentation_mask
+        
+        # Se a IA não retornou nada, devolve máscara preta
         if mask is None:
             return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
+
+        # --- TUNING / FILTRO DE RUIDO ---
+        
+        # 1. Threshold Rígido: Ignora pixels com confiança baixa (< 50%)
+        # Isso remove sombras e objetos que a IA está "em dúvida"
+        mask[mask < 0.5] = 0
+        
+        # 2. Verificação de Área: A pessoa ocupa espaço suficiente?
+        # Se a soma dos pixels brancos for muito pequena, é alucinação.
+        # Vamos exigir que a pessoa ocupe pelo menos 0.5% da imagem.
+        img_area = image.shape[0] * image.shape[1]
+        person_area = np.count_nonzero(mask)
+        
+        if person_area < (img_area * 0.005): # 0.5% threshold
+            # Se for muito pequeno, consideramos que NÃO TEM NINGUÉM
+            return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
             
-        # Soft edges blur
-        mask = cv2.GaussianBlur(mask, (15, 15), 0)
+        # 3. Suavização (Blur)
+        # Se passou nos testes, aplicamos o blur para a borda ficar bonita
+        mask = cv2.GaussianBlur(mask, (21, 21), 0)
+        
         return mask
 
     def blend_human_safe(self, original, corrected_brand, mask):
