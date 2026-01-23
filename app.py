@@ -92,51 +92,45 @@ class ColorMatcher:
         return transfer_bgr
 
 # ==========================================
-# 2. AI ENGINE (Human Segmentation - Tuned)
+# 2. AI ENGINE (Human Segmentation - Fixed)
 # ==========================================
 class HumanDetector:
     def __init__(self):
         self.mp_selfie = mp.solutions.selfie_segmentation
-        # model_selection=1 é melhor para o corpo inteiro/paisagem
         self.segmenter = self.mp_selfie.SelfieSegmentation(model_selection=1)
 
     def get_mask(self, image):
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self.segmenter.process(img_rgb)
         
-        mask = results.segmentation_mask
-        
-        # Se a IA não retornou nada, devolve máscara preta
-        if mask is None:
+        # Se não achou nada, retorna preto
+        if results.segmentation_mask is None:
             return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
 
-        # --- TUNING / FILTRO DE RUIDO ---
-        
-        # 1. Threshold Rígido: Ignora pixels com confiança baixa (< 50%)
-        # Isso remove sombras e objetos que a IA está "em dúvida"
+        # --- CORREÇÃO DO ERRO AQUI ---
+        # O MediaPipe entrega a máscara como "Read-Only". 
+        # Usamos .copy() para criar uma versão editável na memória.
+        mask = results.segmentation_mask.copy()
+        # -----------------------------
+
+        # 1. Threshold Rígido: Limpa ruído (sombras fracas)
+        # Zera tudo que a IA não tem pelo menos 50% de certeza
         mask[mask < 0.5] = 0
         
-        # 2. Verificação de Área: A pessoa ocupa espaço suficiente?
-        # Se a soma dos pixels brancos for muito pequena, é alucinação.
-        # Vamos exigir que a pessoa ocupe pelo menos 0.5% da imagem.
+        # 2. Verificação de Área: Ignora "manchas" pequenas
         img_area = image.shape[0] * image.shape[1]
         person_area = np.count_nonzero(mask)
         
-        if person_area < (img_area * 0.005): # 0.5% threshold
-            # Se for muito pequeno, consideramos que NÃO TEM NINGUÉM
+        # Se a pessoa ocupa menos de 0.5% da foto, consideramos erro
+        if person_area < (img_area * 0.005): 
             return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
             
-        # 3. Suavização (Blur)
-        # Se passou nos testes, aplicamos o blur para a borda ficar bonita
+        # 3. Suavização das bordas
         mask = cv2.GaussianBlur(mask, (21, 21), 0)
         
         return mask
 
     def blend_human_safe(self, original, corrected_brand, mask):
-        """
-        Background: 100% Brand Look
-        Person: 70% Original / 30% Brand Look
-        """
         person_look = cv2.addWeighted(original, 0.7, corrected_brand, 0.3, 0)
         
         mask_3d = np.dstack((mask, mask, mask))
