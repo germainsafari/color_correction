@@ -49,16 +49,17 @@ class ColorMatcher:
 
     def apply_smart_transfer(self, source, target):
         """
-        Applies color correction preserving 75% of original contrast
-        to prevent 'washed out' look.
+        Applies color correction and finalizes with a smart 'Auto-Contrast' 
+        step to prevent the 'washed-out' look (especially in cold tones).
         """
+        # Convert to LAB space (L=Lightness, A=Green/Red, B=Blue/Yellow)
         source_lab = cv2.cvtColor(source, cv2.COLOR_BGR2LAB).astype("float32")
         target_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB).astype("float32")
 
         (l_src, a_src, b_src) = cv2.split(source_lab)
         (l_tar, a_tar, b_tar) = cv2.split(target_lab)
 
-        # Stats
+        # Calculate Statistics (Mean & Standard Deviation)
         l_mean_src, l_std_src = l_src.mean(), l_src.std()
         a_mean_src, a_std_src = a_src.mean(), a_src.std()
         b_mean_src, b_std_src = b_src.mean(), b_src.std()
@@ -69,24 +70,45 @@ class ColorMatcher:
 
         eps = 1e-5
         
-        # 1. Chroma (A/B): Aggressive match to reference
+        # 1. Color (Chroma - A/B Channels): Aggressive match
+        # We want to force the brand colors onto the image
         a_new = ((a_src - a_mean_src) * (a_std_tar / (a_std_src + eps))) + a_mean_tar
         b_new = ((b_src - b_mean_src) * (b_std_tar / (b_std_src + eps))) + b_mean_tar
 
-        # 2. Luma (L): Hybrid Approach
-        # Match Exposure (Mean) but preserve Structure (Std Dev)
-        target_mean = l_mean_tar
-        # Blend: 75% Original Contrast / 25% Reference Contrast
-        contrast_blend = (l_std_src * 0.75) + (l_std_tar * 0.25)
+        # 2. Lightness (Luma - L Channel): Soft Transfer
+        # We blend the contrast (Std Dev) to avoid destroying the image structure.
+        # 80% Original Contrast / 20% Reference Contrast
+        contrast_blend = (l_std_src * 0.80) + (l_std_tar * 0.20)
         
-        l_new = ((l_src - l_mean_src) * (contrast_blend / (l_std_src + eps))) + target_mean
+        # Apply Reinhard Transfer for Lightness
+        l_new = ((l_src - l_mean_src) * (contrast_blend / (l_std_src + eps))) + l_mean_tar
 
-        # Clipping
-        l_new = np.clip(l_new, 0, 255)
+        # --- STEP 3: DYNAMIC RANGE RECOVERY (AUTO-LEVELS) ---
+        # Cold photos tend to look gray/flat after transfer. 
+        # This step stretches the histogram to ensure true blacks.
+        
+        # Get the darkest (1%) and brightest (99%) pixel values
+        # We use 1% and 99% instead of 0/100 to ignore outliers/dead pixels
+        min_val = np.percentile(l_new, 1)
+        max_val = np.percentile(l_new, 99)
+        
+        # Min-Max Normalization (Stretching logic)
+        scale = 255.0 / (max_val - min_val + eps)
+        l_stretched = (l_new - min_val) * scale
+        
+        # Final Blend:
+        # We don't apply the stretch 100%, as it might look artificial.
+        # We mix 30% Stretched result with 70% Reinhard result.
+        l_final = (l_stretched * 0.3) + (l_new * 0.7)
+        # ----------------------------------------------------
+
+        # Final Clipping to valid 0-255 range
+        l_final = np.clip(l_final, 0, 255)
         a_new = np.clip(a_new, 0, 255)
         b_new = np.clip(b_new, 0, 255)
 
-        transfer_lab = cv2.merge([l_new, a_new, b_new])
+        # Merge channels and convert back to BGR
+        transfer_lab = cv2.merge([l_final, a_new, b_new])
         transfer_bgr = cv2.cvtColor(transfer_lab.astype("uint8"), cv2.COLOR_LAB2BGR)
         
         return transfer_bgr
