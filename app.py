@@ -227,7 +227,12 @@ else:
     st.sidebar.info("Please create a folder named 'references' and add your brand JPG/PNG files there.")
 
 # --- MAIN AREA ---
-target_file = st.file_uploader("Drop image here to process", type=['png', 'jpg', 'jpeg'])
+# 5 MB limit so uploads work on Render (avoids 400 from proxy/body limits)
+target_file = st.file_uploader(
+    "Drop image here to process (max 5 MB)",
+    type=['png', 'jpg', 'jpeg'],
+    max_upload_size=5,
+)
 
 if target_file and reference_images:
     pil_image = Image.open(target_file)

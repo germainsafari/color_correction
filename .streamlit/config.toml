@@ -1,0 +1,10 @@
+# Streamlit config for local and deployed (e.g. Render).
+# Keeps upload size under typical proxy/body limits to avoid 400 on file upload.
+
+[server]
+# Max file upload size in MB. Conservative for Render/proxy limits (often ~5–10 MB).
+maxUploadSize = 5
+
+# Ensure the app works behind reverse proxies (Render, etc.)
+enableCORS = false
+enableXsrfProtection = true
