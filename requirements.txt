@@ -1,4 +1,4 @@
 streamlit
-mediapipe==0.10.14
+mediapipe>=0.10.30
 numpy<2.0.0
 Pillow
