@@ -2,9 +2,13 @@
 # Keeps upload size under typical proxy/body limits to avoid 400 on file upload.
 
 [server]
-# Max file upload size in MB. Conservative for Render/proxy limits (often ~5–10 MB).
-maxUploadSize = 5
+# Max file upload size in MB. Allow images larger than 5 MB (e.g. 20 MB).
+maxUploadSize = 20
 
 # Ensure the app works behind reverse proxies (Render, etc.)
 enableCORS = false
 enableXsrfProtection = true
+
+# Render: listen on all interfaces and use PORT from env (set via start command)
+# headless = true avoids needing a browser; health checks hit /_stcore/health
+headless = true

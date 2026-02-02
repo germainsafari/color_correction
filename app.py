@@ -2,9 +2,11 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
-import mediapipe as mp
 import os
 import glob
+
+# MediaPipe is imported lazily inside HumanDetector so the app can start and pass
+# health checks even when MediaPipe fails (e.g. Python 3.13 or missing libs on Render).
 
 # ==========================================
 # 1. COLOR ENGINE (Statistical / Reinhard)
@@ -112,10 +114,15 @@ class ColorMatcher:
 # ==========================================
 class HumanDetector:
     def __init__(self):
+        """
+        Lazily import and initialize MediaPipe.
+        Any import / runtime errors should be handled by the caller.
+        """
+        import mediapipe as mp
         # 1. Face Detector (The Gatekeeper)
         self.mp_face = mp.solutions.face_detection
         self.face_detector = self.mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.6)
-        
+
         # 2. Body Segmenter (The Masker)
         self.mp_selfie = mp.solutions.selfie_segmentation
         self.segmenter = self.mp_selfie.SelfieSegmentation(model_selection=1)
@@ -131,15 +138,15 @@ class HumanDetector:
         # Gatekeeper: No face? No mask.
         if not self.has_face(img_rgb):
             return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
-
+        
         results = self.segmenter.process(img_rgb)
         
         if results.segmentation_mask is None:
             return np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
-
+        
         # Create writable copy
         mask = results.segmentation_mask.copy()
-
+        
         # Hard Threshold
         mask[mask < 0.5] = 0
         
@@ -227,11 +234,11 @@ else:
     st.sidebar.info("Please create a folder named 'references' and add your brand JPG/PNG files there.")
 
 # --- MAIN AREA ---
-# 5 MB limit so uploads work on Render (avoids 400 from proxy/body limits)
+# 20 MB limit; increase server maxUploadSize in .streamlit/config.toml to match
 target_file = st.file_uploader(
-    "Drop image here to process (max 5 MB)",
+    "Drop image here to process (max 20 MB)",
     type=['png', 'jpg', 'jpeg'],
-    max_upload_size=5,
+    max_upload_size=20,
 )
 
 if target_file and reference_images:
@@ -242,10 +249,13 @@ if target_file and reference_images:
     color_engine = ColorMatcher()
     try:
         ai_engine = HumanDetector() if use_ai else None
-    except (AttributeError, Exception) as e:
+    except Exception as e:
+        # If MediaPipe fails to import or initialize, fall back gracefully
         ai_engine = None
         if use_ai:
             st.sidebar.warning("AI face protection unavailable (MediaPipe issue). Color correction only.")
+            # Expose the underlying error for easier debugging on local runs
+            st.sidebar.caption(f"MediaPipe error: {e}")
     
     with st.spinner('Processing...'):
         # 1. Find Best Reference
@@ -257,8 +267,8 @@ if target_file and reference_images:
         final_img = corrected_base
         mask_visualization = None
         
-        # 3. AI Processing (If enabled AND face detected)
-        if use_ai:
+        # 3. AI Processing (If enabled AND face detector is available)
+        if use_ai and ai_engine is not None:
             mask = ai_engine.get_mask(input_img)
             
             if np.max(mask) > 0.1:
