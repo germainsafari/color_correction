@@ -19,40 +19,60 @@ class ColorMatcher:
         return (l.mean(), l.std(), a.mean(), a.std(), b.mean(), b.std())
 
     def find_best_reference(self, source_img, reference_images):
-        src_stats = self.get_image_stats(source_img)
-        src_l_mean = src_stats[0]
-        src_a_mean = src_stats[2]
-        src_b_mean = src_stats[4]
+        """
+        Content-based reference matching using STRUCTURAL SIMILARITY.
+        
+        Converts images to grayscale and uses histogram equalization + 
+        Normalized Cross-Correlation (NCC) to match by scene structure,
+        completely independent of color grading differences.
+        
+        This ensures a warm-toned photo of a person matches the correctly
+        graded reference of that SAME person, not some random reference
+        that happens to have similar average colors.
+        """
+        match_size = (300, 300)
+        
+        # Prepare source: grayscale → equalize → float
+        src_gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
+        src_resized = cv2.resize(src_gray, match_size)
+        # Histogram equalization normalizes brightness distribution,
+        # making the comparison invariant to exposure/color differences
+        src_eq = cv2.equalizeHist(src_resized).astype(np.float32)
         
         best_ref = None
-        min_diff = float('inf')
+        best_score = -float('inf')
         best_ref_name = ""
         
         for name, ref_img in reference_images.items():
-            ref_stats = self.get_image_stats(ref_img)
-            ref_l_mean = ref_stats[0]
-            ref_a_mean = ref_stats[2]
-            ref_b_mean = ref_stats[4]
+            ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+            ref_resized = cv2.resize(ref_gray, match_size)
+            ref_eq = cv2.equalizeHist(ref_resized).astype(np.float32)
             
-            # Weighted Euclidean Distance
-            # Higher weight on Luminance (2.0) to avoid exposure mismatches
-            diff_l = (src_l_mean - ref_l_mean) ** 2
-            diff_a = (src_a_mean - ref_a_mean) ** 2
-            diff_b = (src_b_mean - ref_b_mean) ** 2
+            # NCC on equalized grayscale: compares structural patterns
+            # (edges, shapes, textures) independent of color/brightness
+            ncc = cv2.matchTemplate(
+                src_eq, ref_eq, cv2.TM_CCOEFF_NORMED
+            )[0][0]
             
-            total_diff = np.sqrt((diff_l * 2.0) + diff_a + diff_b)
-            
-            if total_diff < min_diff:
-                min_diff = total_diff
+            if ncc > best_score:
+                best_score = ncc
                 best_ref = ref_img
                 best_ref_name = name
                 
-        return best_ref, best_ref_name
+        return best_ref, best_ref_name, best_score
 
-    def apply_smart_transfer(self, source, target, use_auto_contrast=True):
+    def apply_smart_transfer(self, source, target, use_auto_contrast=True, chroma_strength=0.75):
         """
-        Applies color correction. 
-        If use_auto_contrast is True, it performs dynamic range stretching.
+        Applies color correction with configurable chroma intensity.
+        
+        Args:
+            source: Input BGR image to correct.
+            target: Reference BGR image (the desired look).
+            use_auto_contrast: If True, performs dynamic range stretching.
+            chroma_strength: 0.0 = keep original colors, 1.0 = full Reinhard.
+                             Default 0.75 gives strong correction while
+                             retaining some original tonality to prevent
+                             extreme yellow/blue casts.
         """
         # Convert to LAB space
         source_lab = cv2.cvtColor(source, cv2.COLOR_BGR2LAB).astype("float32")
@@ -72,9 +92,14 @@ class ColorMatcher:
 
         eps = 1e-5
         
-        # 1. Color (Chroma - A/B Channels): Aggressive match
-        a_new = ((a_src - a_mean_src) * (a_std_tar / (a_std_src + eps))) + a_mean_tar
-        b_new = ((b_src - b_mean_src) * (b_std_tar / (b_std_src + eps))) + b_mean_tar
+        # 1. Color (Chroma - A/B Channels): Blended Reinhard Transfer
+        #    Full Reinhard can push colors too aggressively (too yellow/blue).
+        #    Blending retains some original tonality for a more natural result.
+        a_reinhard = ((a_src - a_mean_src) * (a_std_tar / (a_std_src + eps))) + a_mean_tar
+        b_reinhard = ((b_src - b_mean_src) * (b_std_tar / (b_std_src + eps))) + b_mean_tar
+        
+        a_new = a_src * (1.0 - chroma_strength) + a_reinhard * chroma_strength
+        b_new = b_src * (1.0 - chroma_strength) + b_reinhard * chroma_strength
 
         # 2. Lightness (Luma - L Channel): Soft Transfer
         # 80% Original Contrast / 20% Reference Contrast
@@ -218,6 +243,13 @@ st.sidebar.header("Settings")
 use_ai = st.sidebar.checkbox("✅ AI Skin Protection", value=True, help="Only active if a face is detected.")
 use_contrast = st.sidebar.checkbox("✅ Auto-Contrast Recovery", value=True, help="Stretches histogram to prevent 'washed out' look on cold images.")
 
+chroma_strength = st.sidebar.slider(
+    "Color Correction Strength",
+    min_value=0.0, max_value=1.0, value=0.75, step=0.05,
+    help="0.0 = keep original colors, 1.0 = full color match. "
+         "Lower values prevent extreme yellow/blue casts."
+)
+
 st.sidebar.divider()
 st.sidebar.subheader("Reference Library")
 
@@ -258,11 +290,15 @@ if target_file and reference_images:
             st.sidebar.caption(f"MediaPipe error: {e}")
     
     with st.spinner('Processing...'):
-        # 1. Find Best Reference
-        best_ref, best_ref_name = color_engine.find_best_reference(input_img, reference_images)
+        # 1. Find Best Reference (content-based structural matching)
+        best_ref, best_ref_name, match_score = color_engine.find_best_reference(input_img, reference_images)
         
-        # 2. Apply Base Correction (With optional Auto-Contrast)
-        corrected_base = color_engine.apply_smart_transfer(input_img, best_ref, use_auto_contrast=use_contrast)
+        # 2. Apply Base Correction (With optional Auto-Contrast + Chroma Strength)
+        corrected_base = color_engine.apply_smart_transfer(
+            input_img, best_ref,
+            use_auto_contrast=use_contrast,
+            chroma_strength=chroma_strength
+        )
         
         final_img = corrected_base
         mask_visualization = None
@@ -279,7 +315,13 @@ if target_file and reference_images:
                 pass
     
     # --- RESULTS DISPLAY ---
-    st.success(f"Matched Guideline: **{best_ref_name}**")
+    confidence_pct = max(0, match_score) * 100
+    if match_score >= 0.45:
+        st.success(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}%)")
+    elif match_score >= 0.25:
+        st.warning(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — low match, verify manually)")
+    else:
+        st.error(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — no close match found in references)")
     
     if mask_visualization is not None:
         c1, c2, c3 = st.columns(3)
