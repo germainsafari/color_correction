@@ -18,7 +18,7 @@ class ColorMatcher:
         (l, a, b) = cv2.split(image_lab)
         return (l.mean(), l.std(), a.mean(), a.std(), b.mean(), b.std())
 
-    def find_best_reference(self, source_img, reference_images):
+    def find_best_reference(self, source_img, reference_images, ref_match_data=None):
         """
         Content-based reference matching using STRUCTURAL SIMILARITY.
         
@@ -26,17 +26,18 @@ class ColorMatcher:
         Normalized Cross-Correlation (NCC) to match by scene structure,
         completely independent of color grading differences.
         
-        This ensures a warm-toned photo of a person matches the correctly
-        graded reference of that SAME person, not some random reference
-        that happens to have similar average colors.
+        Args:
+            source_img: Input BGR image.
+            reference_images: Dict of {name: BGR image}.
+            ref_match_data: Optional dict of {name: precomputed float32
+                            equalized grayscale}. Skips redundant per-call
+                            conversion of all 82+ references.
         """
         match_size = (300, 300)
         
-        # Prepare source: grayscale → equalize → float
+        # Prepare source: grayscale → equalize → float (only the INPUT, once)
         src_gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
         src_resized = cv2.resize(src_gray, match_size)
-        # Histogram equalization normalizes brightness distribution,
-        # making the comparison invariant to exposure/color differences
         src_eq = cv2.equalizeHist(src_resized).astype(np.float32)
         
         best_ref = None
@@ -44,9 +45,14 @@ class ColorMatcher:
         best_ref_name = ""
         
         for name, ref_img in reference_images.items():
-            ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
-            ref_resized = cv2.resize(ref_gray, match_size)
-            ref_eq = cv2.equalizeHist(ref_resized).astype(np.float32)
+            # Use precomputed data when available (cached path — fast)
+            if ref_match_data and name in ref_match_data:
+                ref_eq = ref_match_data[name]
+            else:
+                # Fallback: compute on the fly (slow path)
+                ref_gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                ref_resized = cv2.resize(ref_gray, match_size)
+                ref_eq = cv2.equalizeHist(ref_resized).astype(np.float32)
             
             # NCC on equalized grayscale: compares structural patterns
             # (edges, shapes, textures) independent of color/brightness
@@ -198,13 +204,21 @@ class HumanDetector:
 # 3. HELPER FUNCTIONS
 # ==========================================
 
+@st.cache_resource(show_spinner="Loading reference library...")
 def load_local_references(folder_path="references"):
+    """
+    Loads reference images AND precomputes grayscale-equalized matching data.
+    Cached so the 82+ images are only loaded & processed once per app session,
+    not on every user interaction.
+    """
     images = {}
+    match_data = {}  # Pre-computed matching data (grayscale equalized float32)
     valid_extensions = ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.PNG']
+    match_size = (300, 300)
     
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
-        return images
+        return images, match_data
 
     for ext in valid_extensions:
         search_path = os.path.join(folder_path, ext)
@@ -213,14 +227,27 @@ def load_local_references(folder_path="references"):
                 img = Image.open(file_path)
                 img_array = np.array(img.convert('RGB'))
                 img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                img_cv = cv2.resize(img_cv, (300, 300))
+                img_cv = cv2.resize(img_cv, match_size)
                 
                 filename = os.path.basename(file_path)
                 images[filename] = img_cv
+                
+                # Pre-compute equalized grayscale for fast structural matching
+                gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                gray_eq = cv2.equalizeHist(gray).astype(np.float32)
+                match_data[filename] = gray_eq
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
                 
-    return images
+    return images, match_data
+
+@st.cache_resource(show_spinner=False)
+def get_ai_engine():
+    """Cache the MediaPipe models so they are loaded once, not on every rerun."""
+    try:
+        return HumanDetector(), None
+    except Exception as e:
+        return None, str(e)
 
 def bgr_to_rgb(image):
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -243,18 +270,26 @@ st.sidebar.header("Settings")
 use_ai = st.sidebar.checkbox("✅ AI Skin Protection", value=True, help="Only active if a face is detected.")
 use_contrast = st.sidebar.checkbox("✅ Auto-Contrast Recovery", value=True, help="Stretches histogram to prevent 'washed out' look on cold images.")
 
-chroma_strength = st.sidebar.slider(
+# Auto-adjusted chroma: 0.75 for confident matches, 0.25 for low confidence.
+# Stored in session_state so the slider visually reflects the active value.
+if 'effective_chroma' not in st.session_state:
+    st.session_state.effective_chroma = 0.75
+
+st.sidebar.slider(
     "Color Correction Strength",
-    min_value=0.0, max_value=1.0, value=0.75, step=0.05,
-    help="0.0 = keep original colors, 1.0 = full color match. "
-         "Lower values prevent extreme yellow/blue casts."
+    min_value=0.0, max_value=1.0,
+    value=st.session_state.effective_chroma,
+    step=0.05,
+    disabled=True,
+    help="Automatically set: 0.75 for matches ≥50% confidence, "
+         "0.25 for matches <50% confidence."
 )
 
 st.sidebar.divider()
 st.sidebar.subheader("Reference Library")
 
-# Load references
-reference_images = load_local_references("references")
+# Load references (cached — only loaded once per app session)
+reference_images, ref_match_data = load_local_references("references")
 
 if reference_images:
     st.sidebar.success(f"{len(reference_images)} Reference Images Loaded.")
@@ -277,27 +312,35 @@ if target_file and reference_images:
     pil_image = Image.open(target_file)
     input_img = cv2.cvtColor(np.array(pil_image.convert('RGB')), cv2.COLOR_RGB2BGR)
     
-    # Init Engines
+    # Init Engines (ColorMatcher is lightweight; AI engine is cached)
     color_engine = ColorMatcher()
-    try:
-        ai_engine = HumanDetector() if use_ai else None
-    except Exception as e:
-        # If MediaPipe fails to import or initialize, fall back gracefully
-        ai_engine = None
-        if use_ai:
+    ai_engine = None
+    if use_ai:
+        ai_engine, ai_error = get_ai_engine()
+        if ai_engine is None and ai_error:
             st.sidebar.warning("AI face protection unavailable (MediaPipe issue). Color correction only.")
-            # Expose the underlying error for easier debugging on local runs
-            st.sidebar.caption(f"MediaPipe error: {e}")
+            st.sidebar.caption(f"MediaPipe error: {ai_error}")
     
     with st.spinner('Processing...'):
-        # 1. Find Best Reference (content-based structural matching)
-        best_ref, best_ref_name, match_score = color_engine.find_best_reference(input_img, reference_images)
+        # 1. Find Best Reference (content-based structural matching, using precomputed data)
+        best_ref, best_ref_name, match_score = color_engine.find_best_reference(
+            input_img, reference_images, ref_match_data
+        )
         
         # 2. Apply Base Correction (With optional Auto-Contrast + Chroma Strength)
+        #    Low-confidence matches (<50%) get reduced chroma strength (0.25)
+        #    to avoid pushing colors aggressively when the reference is uncertain.
+        new_chroma = 0.25 if match_score < 0.50 else 0.75
+        
+        # Update sidebar slider if the effective value changed
+        if abs(new_chroma - st.session_state.effective_chroma) > 0.01:
+            st.session_state.effective_chroma = new_chroma
+            st.rerun()
+        
         corrected_base = color_engine.apply_smart_transfer(
             input_img, best_ref,
             use_auto_contrast=use_contrast,
-            chroma_strength=chroma_strength
+            chroma_strength=st.session_state.effective_chroma
         )
         
         final_img = corrected_base
@@ -316,12 +359,12 @@ if target_file and reference_images:
     
     # --- RESULTS DISPLAY ---
     confidence_pct = max(0, match_score) * 100
-    if match_score >= 0.45:
+    if match_score >= 0.50:
         st.success(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}%)")
     elif match_score >= 0.25:
-        st.warning(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — low match, verify manually)")
+        st.warning(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — low match, color strength reduced to 25%)")
     else:
-        st.error(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — no close match found in references)")
+        st.error(f"Matched Guideline: **{best_ref_name}** (confidence: {confidence_pct:.1f}% — no close match, color strength reduced to 25%)")
     
     if mask_visualization is not None:
         c1, c2, c3 = st.columns(3)
