@@ -1,31 +1,38 @@
-print("--- INICIANDO TESTE DE IMPORTS ---")
+print("--- STARTING IMPORT TEST ---")
 
 try:
-    print("1. Tentando importar Numpy...")
+    print("1. Attempting to import Numpy...")
     import numpy
-    print("   -> SUCESSO: Numpy carregado.")
+    print("   -> OK: Numpy loaded.")
 except Exception as e:
-    print(f"   -> ERRO FATAL no Numpy: {e}")
+    print(f"   -> FATAL: {e}")
 
 try:
-    print("2. Tentando importar OpenCV...")
+    print("2. Attempting to import OpenCV...")
     import cv2
-    print("   -> SUCESSO: OpenCV carregado.")
+    print("   -> OK: OpenCV loaded.")
 except Exception as e:
-    print(f"   -> ERRO FATAL no OpenCV: {e}")
+    print(f"   -> FATAL: {e}")
 
 try:
-    print("3. Tentando importar Streamlit...")
-    import streamlit
-    print("   -> SUCESSO: Streamlit carregado.")
+    print("3. Attempting to import FastAPI...")
+    import fastapi
+    print("   -> OK: FastAPI loaded.")
 except Exception as e:
-    print(f"   -> ERRO FATAL no Streamlit: {e}")
+    print(f"   -> FATAL: {e}")
 
 try:
-    print("4. Tentando importar MediaPipe...")
+    print("4. Attempting to import Uvicorn...")
+    import uvicorn
+    print("   -> OK: Uvicorn loaded.")
+except Exception as e:
+    print(f"   -> FATAL: {e}")
+
+try:
+    print("5. Attempting to import MediaPipe...")
     import mediapipe
-    print("   -> SUCESSO: MediaPipe carregado.")
+    print("   -> OK: MediaPipe loaded.")
 except Exception as e:
-    print(f"   -> ERRO FATAL no MediaPipe: {e}")
+    print(f"   -> FATAL: {e}")
 
-print("--- FIM DO TESTE ---")
+print("--- END OF TEST ---")

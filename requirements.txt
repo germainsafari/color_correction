@@ -1,4 +1,6 @@
-streamlit
+fastapi
+uvicorn[standard]
+python-multipart
 mediapipe==0.10.14
 numpy<2.0.0
 Pillow

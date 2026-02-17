@@ -19,8 +19,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Streamlit
-.streamlit/secrets.toml
+# Environment
+.env
+.env.local
 
 # Logs / temp
 *.log
